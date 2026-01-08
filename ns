@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# --- Help Text / Usage Function ---
+usage() {
+    echo "===================================================="
+    echo "NETSHARE: LAN File & Folder Transfer Tool"
+    echo "===================================================="
+    echo "Usage:"
+    echo "  To Receive: $0 receive"
+    echo "  To Send:    $0 send [TARGET_IP] [FILE_OR_FOLDER]"
+    echo ""
+    echo "Dependencies: pv, zstd, nc, tar"
+    echo "===================================================="
+    exit 1
+}
+
+# --- Dependency Check ---
+for cmd in pv zstd nc tar; do
+    if ! command -v $cmd &> /dev/null; then
+        echo "Error: $cmd is not installed. Please install it to continue."
+        exit 1
+    fi
+done
+
+PORT=4444
+MODE=$1
+
+# --- RECEIVER MODE ---
+if [ "$MODE" == "receive" ]; then
+    # Show IP only on the receiver side
+    LOCAL_IP=$(hostname -I | awk '{print $1}')
+    echo "----------------------------------------------------"
+    echo "RECEIVER MODE ACTIVE"
+    echo "Your IP: $LOCAL_IP"
+    echo "Listening on port: $PORT"
+    echo "----------------------------------------------------"
+    echo "Waiting for connection..."
+
+    # FLOW: NC (Network) -> Zstd (Decompress) -> PV (Progress Bar) -> Tar
+    # Format: %b (Bytes), %t (Time), %r (Rate)
+    nc -l -p $PORT | zstd -d | pv -i 0.1 --format " Receiving: [ %b ] [%t] Speed: [%r] " | tar -x
+
+    echo -e "\n[✔] Transfer Complete. Files extracted to current directory."
+
+# --- SENDER MODE ---
+elif [ "$MODE" == "send" ]; then
+    TARGET_IP=$2
+    INPUT=$3
+
+    # Check for missing arguments
+    if [ -z "$TARGET_IP" ] || [ -z "$INPUT" ]; then
+        echo "Error: Sender mode requires a Target IP and an Input path."
+        usage
+    fi
+
+    if [ -e "$INPUT" ]; then
+        # Calculate size for the progress bar
+        SIZE=$(du -sb "$INPUT" | awk '{print $1}')
+        echo "----------------------------------------------------"
+        echo "SENDER MODE ACTIVE"
+        echo "Sending: $INPUT ($((SIZE / 1024 / 1024)) MB)"
+        echo "Target IP: $TARGET_IP"
+        echo "----------------------------------------------------"
+
+        # FLOW: Tar -> PV (Progress Bar) -> Zstd (Compress) -> NC (Network)
+        tar -c "$INPUT" | pv -p -e -r -t -s "$SIZE" | zstd -3 | nc -w 3 $TARGET_IP $PORT
+
+        echo -e "\n[✔] Done."
+    else
+        echo "Error: '$INPUT' not found."
+        exit 1
+    fi
+
+# --- DEFAULT / INVALID INPUT ---
+else
+    usage
+fi
