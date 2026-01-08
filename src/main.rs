@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use crossbeam_channel::{bounded, Sender};
 use indicatif::{ProgressBar, ProgressStyle};
 use local_ip_address::local_ip;
 use openssl::hash::MessageDigest;
@@ -13,13 +14,15 @@ use openssl::pkcs5::pbkdf2_hmac;
 use openssl::rand::rand_bytes;
 use openssl::symm::{Cipher, Crypter, Mode};
 use rpassword::read_password;
+use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
 use std::time::Instant;
 use tokio::task;
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 use zstd::stream::read::Decoder as ZstdDecoder;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
@@ -32,10 +35,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+
+    #[command(verbatim_doc_comment)]
     Send {
+        #[arg(value_name = "IP")]
         ip: String,
+        #[arg(value_name = "PATH")]
         input: PathBuf,
     },
+
+    #[command(verbatim_doc_comment)]
     Recv,
 }
 
@@ -46,6 +55,30 @@ const IV_LEN: usize = 16;
 const SALT_LEN: usize = 16;
 const BUFFER_SIZE: usize = 256 * 1024; // 256KB buffers for better throughput
 const TCP_BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4MB TCP buffers
+
+// Transfer type flags
+const TRANSFER_TYPE_SINGLE_FILE: u8 = 0;
+const TRANSFER_TYPE_DIRECTORY: u8 = 1;
+
+// Parallel file reading configuration
+const FILE_BUFFER_QUEUE_SIZE: usize = 16; // Number of files to buffer in memory
+const MAX_FILE_BUFFER_SIZE: u64 = 16 * 1024 * 1024; // 16MB - only buffer files smaller than this
+// Max total buffered memory = FILE_BUFFER_QUEUE_SIZE * MAX_FILE_BUFFER_SIZE = ~256MB
+
+// Structure to hold a file for tar processing
+enum FileEntry {
+    Buffered {
+        relative_path: PathBuf,
+        data: Vec<u8>,
+        mode: u32,
+    },
+    Streamed {
+        relative_path: PathBuf,
+        full_path: PathBuf,
+        size: u64,
+        mode: u32,
+    },
+}
 
 fn optimize_tcp_stream(stream: &TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)?;
@@ -262,6 +295,65 @@ fn format_duration(duration: std::time::Duration) -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
 
+// Parallel file reader worker
+fn file_reader_worker(
+    work_rx: crossbeam_channel::Receiver<DirEntry>,
+    result_tx: Sender<Result<FileEntry>>,
+    base_path: PathBuf,
+) {
+    while let Ok(entry) = work_rx.recv() {
+        let result = (|| -> Result<FileEntry> {
+            let path = entry.path();
+            let metadata = entry.metadata()?;
+
+            if !metadata.is_file() {
+                anyhow::bail!("Not a file");
+            }
+
+            let relative_path = path.strip_prefix(&base_path)
+                .unwrap_or(path)
+                .to_path_buf();
+
+            let size = metadata.len();
+
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode()
+            };
+
+            #[cfg(not(unix))]
+            let mode = 0o644;
+
+            // Only buffer small files to prevent OOM
+            if size <= MAX_FILE_BUFFER_SIZE {
+                let mut data = Vec::new();
+                let mut file = File::open(path)?;
+                file.read_to_end(&mut data)?;
+
+                Ok(FileEntry::Buffered {
+                    relative_path,
+                    data,
+                    mode,
+                })
+            } else {
+                // Large files: return path for streaming
+                Ok(FileEntry::Streamed {
+                    relative_path,
+                    full_path: path.to_path_buf(),
+                    size,
+                    mode,
+                })
+            }
+        })();
+
+        // Send result (success or error) to main thread
+        if result_tx.send(result).is_err() {
+            break;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -284,12 +376,31 @@ async fn main() -> Result<()> {
 
                 let mut buffered_stream = BufReader::with_capacity(BUFFER_SIZE, stream);
 
+                // Read protocol header
                 let mut salt = [0u8; SALT_LEN];
                 buffered_stream.read_exact(&mut salt).context("Failed to read salt")?;
 
                 let mut size_bytes = [0u8; 8];
                 buffered_stream.read_exact(&mut size_bytes).context("Failed to read size")?;
                 let total_size = u64::from_be_bytes(size_bytes);
+
+                // Read transfer type
+                let mut transfer_type = [0u8; 1];
+                buffered_stream.read_exact(&mut transfer_type).context("Failed to read transfer type")?;
+
+                // For single files, read filename before decryption setup
+                let filename = if transfer_type[0] == TRANSFER_TYPE_SINGLE_FILE {
+                    let mut filename_len_bytes = [0u8; 4];
+                    buffered_stream.read_exact(&mut filename_len_bytes)?;
+                    let filename_len = u32::from_be_bytes(filename_len_bytes) as usize;
+
+                    let mut filename_bytes = vec![0u8; filename_len];
+                    buffered_stream.read_exact(&mut filename_bytes)?;
+                    Some(String::from_utf8(filename_bytes)
+                        .context("Invalid filename encoding")?)
+                } else {
+                    None
+                };
 
                 let (key, iv) = derive_key_iv(&password, &salt)?;
 
@@ -305,10 +416,23 @@ async fn main() -> Result<()> {
                 let start = Instant::now();
                 let aes_reader = AesReader::new(buffered_stream, &key, &iv)?;
                 let zstd_decoder = ZstdDecoder::new(aes_reader)?;
-                let progress_reader = ProgressReader::new(zstd_decoder, progress.clone());
-                let mut archive = tar::Archive::new(progress_reader);
+                let mut progress_reader = ProgressReader::new(zstd_decoder, progress.clone());
 
-                archive.unpack(".").context("Failed to unpack archive")?;
+                match transfer_type[0] {
+                    TRANSFER_TYPE_SINGLE_FILE => {
+                        let filename = filename.unwrap();
+                        let mut output_file = File::create(&filename)
+                            .with_context(|| format!("Failed to create file: {}", filename))?;
+                        io::copy(&mut progress_reader, &mut output_file)?;
+                        output_file.flush()?;
+                    }
+                    TRANSFER_TYPE_DIRECTORY => {
+                        // Use tar to unpack
+                        let mut archive = tar::Archive::new(progress_reader);
+                        archive.unpack(".").context("Failed to unpack archive")?;
+                    }
+                    _ => anyhow::bail!("Unknown transfer type: {}", transfer_type[0]),
+                }
 
                 let elapsed = start.elapsed();
                 progress.finish_with_message(format!("Complete in {}", format_duration(elapsed)));
@@ -325,6 +449,7 @@ async fn main() -> Result<()> {
             task::spawn_blocking(move || -> Result<()> {
                 let path = Path::new(&input);
                 let total_size = calculate_size(path)?;
+                let is_file = path.is_file();
 
                 let mut salt = [0u8; SALT_LEN];
                 rand_bytes(&mut salt).context("Failed to generate salt")?;
@@ -338,9 +463,24 @@ async fn main() -> Result<()> {
 
                 let mut buffered_stream = BufWriter::with_capacity(BUFFER_SIZE, stream);
 
+                // Send protocol header
                 buffered_stream.write_all(&salt).context("Failed to send salt")?;
-
                 buffered_stream.write_all(&total_size.to_be_bytes()).context("Failed to send size")?;
+
+                // Send transfer type
+                let transfer_type = if is_file { TRANSFER_TYPE_SINGLE_FILE } else { TRANSFER_TYPE_DIRECTORY };
+                buffered_stream.write_all(&[transfer_type]).context("Failed to send transfer type")?;
+
+                // For single files, send filename
+                if is_file {
+                    let filename = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .context("Invalid filename")?;
+                    let filename_bytes = filename.as_bytes();
+                    buffered_stream.write_all(&(filename_bytes.len() as u32).to_be_bytes())?;
+                    buffered_stream.write_all(filename_bytes)?;
+                }
+
                 buffered_stream.flush()?;
 
                 let progress = Arc::new(ProgressBar::new(total_size));
@@ -355,19 +495,108 @@ async fn main() -> Result<()> {
                 let start = Instant::now();
                 let aes_writer = AesWriter::new(buffered_stream, &key, &iv)?;
                 let mut zstd_encoder = ZstdEncoder::new(aes_writer, 3)?;
-                zstd_encoder.multithread(num_cpus::get() as u32)?; // Use all available cores
+                zstd_encoder.multithread(num_cpus::get() as u32)?;
 
-                {
+                if is_file {
+                    // Fast path: stream file directly without tar overhead
+                    let mut file = File::open(path)?;
+                    let progress_writer = ProgressWriter::new(&mut zstd_encoder, progress.clone());
+                    let mut buf_writer = BufWriter::with_capacity(BUFFER_SIZE, progress_writer);
+                    io::copy(&mut file, &mut buf_writer)?;
+                    buf_writer.flush()?;
+                } else {
+                    // Directory: use parallel file buffering with tar
+                    let base_path = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                    let dir_name = path.file_name().unwrap_or(path.as_os_str());
+
+                    // Collect all file entries
+                    let mut entries: Vec<DirEntry> = WalkDir::new(path)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.file_type().is_file())
+                        .collect();
+
+                    // Sort for deterministic ordering
+                    entries.sort_by(|a, b| a.path().cmp(b.path()));
+
+                    let num_workers = num_cpus::get().min(8); // Cap at 8 workers
+                    let (work_tx, work_rx) = bounded::<DirEntry>(FILE_BUFFER_QUEUE_SIZE);
+                    let (result_tx, result_rx) = bounded::<Result<FileEntry>>(FILE_BUFFER_QUEUE_SIZE);
+
+                    // Spawn worker threads
+                    let mut workers = Vec::new();
+                    for _ in 0..num_workers {
+                        let work_rx_clone = work_rx.clone();
+                        let result_tx_clone = result_tx.clone();
+                        let base_path_clone = base_path.clone();
+
+                        let handle = thread::spawn(move || {
+                            file_reader_worker(work_rx_clone, result_tx_clone, base_path_clone);
+                        });
+                        workers.push(handle);
+                    }
+
+                    // Drop the original senders so workers can detect when work is done
+                    drop(result_tx);
+
+                    // Send work to workers in a separate thread
+                    let total_files = entries.len();
+                    thread::spawn(move || {
+                        for entry in entries {
+                            if work_tx.send(entry).is_err() {
+                                break;
+                            }
+                        }
+                        drop(work_tx);
+                    });
+
+                    // Build tar archive from file entries
                     let progress_writer = ProgressWriter::new(&mut zstd_encoder, progress.clone());
                     let mut tar_builder = tar::Builder::new(progress_writer);
-                    let name = path.file_name().unwrap_or(path.as_os_str());
 
-                    if path.is_dir() {
-                        tar_builder.append_dir_all(name, path)?;
-                    } else {
-                        tar_builder.append_path_with_name(path, name)?;
+                    let mut files_processed = 0;
+
+                    while let Ok(result) = result_rx.recv() {
+                        let entry = result?;
+
+                        match entry {
+                            FileEntry::Buffered { relative_path, data, mode } => {
+                                let tar_path = PathBuf::from(dir_name).join(&relative_path);
+
+                                let mut header = tar::Header::new_gnu();
+                                header.set_size(data.len() as u64);
+                                header.set_mode(mode);
+                                header.set_cksum();
+
+                                tar_builder.append_data(&mut header, tar_path, &data[..])?;
+                            }
+                            FileEntry::Streamed { relative_path, full_path, size, mode } => {
+                                let tar_path = PathBuf::from(dir_name).join(&relative_path);
+
+                                let mut file = File::open(&full_path)
+                                    .with_context(|| format!("Failed to open {}", full_path.display()))?;
+
+                                let mut header = tar::Header::new_gnu();
+                                header.set_size(size);
+                                header.set_mode(mode);
+                                header.set_cksum();
+
+                                tar_builder.append_data(&mut header, tar_path, &mut file)?;
+                            }
+                        }
+
+                        files_processed += 1;
+                        if files_processed >= total_files {
+                            break;
+                        }
                     }
+
                     tar_builder.finish()?;
+
+                    // Wait for all workers to complete
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
                 }
 
                 let mut aes_writer = zstd_encoder.finish()?;

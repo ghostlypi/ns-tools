@@ -2,6 +2,8 @@
 name = "nsen"
 version = "0.1.0"
 edition = "2024"
+authors = ["Parth Iyer <parth.iyer@gmail.com>"]
+description = "Network Share ENcrypted (nsen) - A fast, encrypted file transfer tool"
 
 [dependencies]
 tar = "0.4.44"
@@ -15,6 +17,7 @@ local-ip-address = "0.6"
 num_cpus = "1.16"
 indicatif = "0.17"
 walkdir = "2"
+crossbeam-channel = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
