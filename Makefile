@@ -1,6 +1,5 @@
-CARGO       := cargo
-CROSS       := CROSS_CONTAINER_ENGINE=podman CROSS_TARGET_DIR=$(CURDIR)/target cross
-ZIG_VERSION := 0.15.2
+CARGO := cargo
+CROSS := CROSS_CONTAINER_ENGINE=podman CROSS_TARGET_DIR=$(CURDIR)/target cross
 
 LINUX_X64   := x86_64-unknown-linux-gnu
 LINUX_ARM64 := aarch64-unknown-linux-gnu
@@ -115,10 +114,8 @@ setup-ci:
 		echo "==> Linux CI setup (Ubuntu)..."; \
 		sudo apt-get update -q; \
 		sudo apt-get install -y gcc make perl mingw-w64; \
-		echo "==> Installing zig $(ZIG_VERSION)..."; \
-		curl -fsSL "https://ziglang.org/download/$(ZIG_VERSION)/zig-linux-x86_64-$(ZIG_VERSION).tar.xz" \
-			| sudo tar -xJ -C /usr/local/lib; \
-		sudo ln -sf "/usr/local/lib/zig-linux-x86_64-$(ZIG_VERSION)/zig" /usr/local/bin/zig; \
+		echo "==> Installing zig..."; \
+		sudo snap install zig --classic; \
 		rustup target add $(LINUX_ARM64) $(WIN_X64); \
 		cargo install cargo-deb cargo-generate-rpm cargo-zigbuild; \
 	fi
