@@ -1,0 +1,121 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ── Linux + Windows x86_64 ───────────────────────────────────────────────────
+  # Builds: Linux x86_64+arm64 (.deb/.rpm), Windows x86_64
+  linux:
+    name: Linux & Windows x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup build dependencies
+        run: make setup-ci
+
+      - name: Build
+        run: make linux windows-x64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-linux
+          path: dist/
+          if-no-files-found: error
+
+  # ── macOS ────────────────────────────────────────────────────────────────────
+  # Builds: macOS x86_64 and arm64
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup build dependencies
+        run: make setup-ci
+
+      - name: Build
+        run: make macos
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-macos
+          path: dist/
+          if-no-files-found: error
+
+  # ── Windows arm64 ────────────────────────────────────────────────────────────
+  # Builds: Windows aarch64 (MSVC, requires a Windows runner)
+  windows-arm64:
+    name: Windows arm64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-windows-arm64
+          path: target/aarch64-pc-windows-msvc/release/nsen.exe
+          if-no-files-found: error
+
+  # ── Release ──────────────────────────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: [ linux, macos, windows-arm64 ]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect artifacts
+        run: |
+          mkdir release
+          # Linux and macOS dist directories
+          for f in artifacts/artifacts-linux/* artifacts/artifacts-macos/*; do
+            [ -f "$f" ] && cp "$f" release/
+          done
+          # Windows arm64 binary
+          cp artifacts/artifacts-windows-arm64/nsen.exe release/nsen-aarch64-pc-windows-msvc.exe
+          # Mark binaries executable
+          chmod +x release/nsen-* 2>/dev/null || true
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

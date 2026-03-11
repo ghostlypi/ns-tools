@@ -361,7 +361,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Recv => {
             let ip = local_ip().context("Failed to get local IP")?;
-            println!("Listening on {}:{}", ip, PORT);
+            println!("Connect to {}", ip);
 
             print!("Enter password: ");
             io::stdout().flush()?;
@@ -407,7 +407,7 @@ async fn main() -> Result<()> {
                 let progress = Arc::new(ProgressBar::new(total_size));
                 progress.set_style(
                     ProgressStyle::default_bar()
-                        .template("{msg}\n{bar:40.cyan/blue} {bytes}/{total_bytes} | {bytes_per_sec} | {eta_precise}")
+                        .template("{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} | {bytes_per_sec} | {eta_precise}")
                         .unwrap()
                         .progress_chars("=>-"),
                 );
@@ -440,7 +440,7 @@ async fn main() -> Result<()> {
             }).await??;
         }
         Commands::Send { ip, input } => {
-            println!("Connecting to {}:{}...", ip, PORT);
+            println!("Connecting to {}...", ip);
 
             print!("Enter password: ");
             io::stdout().flush()?;
@@ -486,7 +486,7 @@ async fn main() -> Result<()> {
                 let progress = Arc::new(ProgressBar::new(total_size));
                 progress.set_style(
                     ProgressStyle::default_bar()
-                        .template("{msg}\n{bar:40.cyan/blue} {bytes}/{total_bytes} | {bytes_per_sec} | {eta_precise}")
+                        .template("{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} | {bytes_per_sec} | {eta_precise}")
                         .unwrap()
                         .progress_chars("=>-"),
                 );

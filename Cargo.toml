@@ -4,15 +4,16 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Parth Iyer <parth.iyer@gmail.com>"]
 description = "Network Share ENcrypted (nsen) - A fast, encrypted file transfer tool"
+license = "BSD-3-Clause"
 
 [dependencies]
 tar = "0.4.44"
 tokio = { version = "1", features = ["full"] }
 zstd = { version = "0.13.3", features = ["zstdmt"] }
 clap = { version = "4.5", features = ["derive"] }
+openssl = { version = "0.10", features = ["vendored"] }
 anyhow = "1.0"
 rpassword = "7.3"
-openssl = "0.10"
 local-ip-address = "0.6"
 num_cpus = "1.16"
 indicatif = "0.17"
@@ -21,3 +22,17 @@ crossbeam-channel = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[package.metadata.deb]
+maintainer = "Parth Iyer <parth.iyer@gmail.com>"
+depends = ""
+section = "net"
+priority = "optional"
+assets = [
+  ["target/release/nsen", "/usr/bin/nsen", "755"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/release/nsen", dest = "/usr/bin/nsen", mode = "755" },
+]
