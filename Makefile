@@ -39,7 +39,7 @@ linux-x64:
 linux-arm64:
 	$(CARGO) zigbuild --release --target $(LINUX_ARM64)
 	$(CARGO) deb   --no-build --no-strip --target $(LINUX_ARM64)
-	$(CARGO) generate-rpm    --no-strip --target $(LINUX_ARM64)
+	$(CARGO) generate-rpm    --target $(LINUX_ARM64)
 	@mkdir -p $(OUT)
 	cp target/$(LINUX_ARM64)/release/nsen         $(OUT)/nsen-$(LINUX_ARM64)
 	cp target/$(LINUX_ARM64)/debian/*.deb         $(OUT)/
