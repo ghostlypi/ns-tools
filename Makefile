@@ -116,10 +116,6 @@ setup-ci:
 		echo "==> Linux CI setup (Ubuntu)..."; \
 		sudo apt-get update -q; \
 		sudo apt-get install -y gcc make perl mingw-w64; \
-		echo "==> Installing zig $(ZIG_VERSION)..."; \
-		curl -fsSL "https://ziglang.org/download/$(ZIG_VERSION)/zig-linux-x86_64-$(ZIG_VERSION).tar.xz" \
-			| sudo tar -xJ -C /usr/local/lib && \
-		sudo ln -sf "/usr/local/lib/zig-linux-x86_64-$(ZIG_VERSION)/zig" /usr/local/bin/zig; \
 		rustup target add $(LINUX_ARM64) $(WIN_X64); \
 		cargo install cargo-deb cargo-generate-rpm cargo-zigbuild; \
 	fi

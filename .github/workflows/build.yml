@@ -22,6 +22,11 @@ jobs:
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: '0.14.0'
+
       - name: Setup build dependencies
         run: make setup-ci
 
