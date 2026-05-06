@@ -506,7 +506,7 @@ async fn main() -> Result<()> {
                     buf_writer.flush()?;
                 } else {
                     // Directory: use parallel file buffering with tar
-                    let base_path = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                    let base_path = path.to_path_buf();
                     let dir_name = path.file_name().unwrap_or(path.as_os_str());
 
                     // Collect all file entries

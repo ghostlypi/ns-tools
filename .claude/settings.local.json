@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(./target/release/nsen:*)",
+      "Bash(make all:*)",
+      "Bash(make linux-arm64:*)",
+      "Bash(make macos:*)",
+      "Bash(cargo zigbuild:*)",
+      "Bash(make windows:*)"
+    ]
+  }
+}
