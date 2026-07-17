@@ -1,0 +1,15 @@
+[Unit]
+Description=netdrop — AirDrop-like receiver for nsen
+Documentation=https://github.com/parthiyer/nsen
+# Needs the graphical session for the Accept/Reject dialog and notifications.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/netdrop daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

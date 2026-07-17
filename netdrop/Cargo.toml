@@ -1,0 +1,26 @@
+[package]
+name = "netdrop"
+version = "0.1.0"
+edition = "2021"
+authors = ["Parth Iyer <parth.iyer@gmail.com>"]
+description = "AirDrop-like discovery and post-quantum key exchange wrapper around nsen"
+license = "BSD-3-Clause"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+# Post-quantum key exchange: ML-KEM-768 (FIPS 203), pure Rust.
+ml-kem = "0.2"
+rand = "0.8"
+# Key derivation from the KEM shared secret.
+hkdf = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+# Control-channel messages.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Locating ~/.config/nsen and ~/Downloads.
+dirs = "5.0"
+# mDNS / DNS-SD discovery of _nsen._tcp devices.
+mdns-sd = "0.11"
+local-ip-address = "0.6"

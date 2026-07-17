@@ -28,20 +28,22 @@ windows: windows-x64 windows-arm64
 # ── Linux ──────────────────────────────────────────────────────────────────────
 
 linux-x64:
-	$(CARGO) build --release --target $(LINUX_X64)
+	$(CARGO) build --release --workspace --target $(LINUX_X64)
 	$(CARGO) deb   --no-build --target $(LINUX_X64)
 	$(CARGO) generate-rpm    --target $(LINUX_X64)
 	@mkdir -p $(OUT)
 	cp target/$(LINUX_X64)/release/nsen           $(OUT)/nsen-$(LINUX_X64)
+	cp target/$(LINUX_X64)/release/netdrop        $(OUT)/netdrop-$(LINUX_X64)
 	cp target/$(LINUX_X64)/debian/*.deb           $(OUT)/
 	cp target/$(LINUX_X64)/generate-rpm/*.rpm     $(OUT)/
 
 linux-arm64:
-	$(CARGO) zigbuild --release --target $(LINUX_ARM64)
+	$(CARGO) zigbuild --release --workspace --target $(LINUX_ARM64)
 	$(CARGO) deb   --no-build --no-strip --target $(LINUX_ARM64)
 	$(CARGO) generate-rpm    --target $(LINUX_ARM64)
 	@mkdir -p $(OUT)
 	cp target/$(LINUX_ARM64)/release/nsen         $(OUT)/nsen-$(LINUX_ARM64)
+	cp target/$(LINUX_ARM64)/release/netdrop      $(OUT)/netdrop-$(LINUX_ARM64)
 	cp target/$(LINUX_ARM64)/debian/*.deb         $(OUT)/
 	cp target/$(LINUX_ARM64)/generate-rpm/*.rpm   $(OUT)/
 

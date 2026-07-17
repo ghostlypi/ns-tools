@@ -42,10 +42,39 @@ enum Commands {
         ip: String,
         #[arg(value_name = "PATH")]
         input: PathBuf,
+        /// Read the password from a single line on stdin instead of prompting.
+        #[arg(long)]
+        password_stdin: bool,
+        /// Port to connect to (defaults to 4444).
+        #[arg(long)]
+        port: Option<u16>,
     },
 
     #[command(verbatim_doc_comment)]
-    Recv,
+    Recv {
+        /// Read the password from a single line on stdin instead of prompting.
+        #[arg(long)]
+        password_stdin: bool,
+        /// Port to listen on (defaults to 4444).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+}
+
+/// Obtain the transfer password either from a single line on stdin
+/// (non-interactive, for wrapper tools like ndrop) or via the interactive prompt.
+fn get_password(from_stdin: bool) -> Result<String> {
+    if from_stdin {
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .context("Failed to read password from stdin")?;
+        Ok(line.trim_end_matches(['\n', '\r']).to_string())
+    } else {
+        print!("Enter password: ");
+        io::stdout().flush()?;
+        Ok(read_password()?)
+    }
 }
 
 const PORT: u16 = 4444;
@@ -359,16 +388,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Recv => {
+        Commands::Recv { password_stdin, port } => {
             let ip = local_ip().context("Failed to get local IP")?;
             println!("Connect to {}", ip);
 
-            print!("Enter password: ");
-            io::stdout().flush()?;
-            let password = read_password()?;
+            let password = get_password(password_stdin)?;
+            let port = port.unwrap_or(PORT);
 
             task::spawn_blocking(move || -> Result<()> {
-                let listener = TcpListener::bind(format!("0.0.0.0:{}", PORT))?;
+                let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
                 println!("Waiting for connection...");
                 let (stream, _) = listener.accept()?;
 
@@ -439,12 +467,11 @@ async fn main() -> Result<()> {
                 Ok(())
             }).await??;
         }
-        Commands::Send { ip, input } => {
+        Commands::Send { ip, input, password_stdin, port } => {
             println!("Connecting to {}...", ip);
 
-            print!("Enter password: ");
-            io::stdout().flush()?;
-            let password = read_password()?;
+            let password = get_password(password_stdin)?;
+            let port = port.unwrap_or(PORT);
 
             task::spawn_blocking(move || -> Result<()> {
                 let path = Path::new(&input);
@@ -455,7 +482,7 @@ async fn main() -> Result<()> {
                 rand_bytes(&mut salt).context("Failed to generate salt")?;
                 let (key, iv) = derive_key_iv(&password, &salt)?;
 
-                let addr = format!("{}:{}", ip, PORT);
+                let addr = format!("{}:{}", ip, port);
                 let stream = TcpStream::connect(&addr)
                     .with_context(|| format!("Failed to connect to {}. Make sure the receiver is running and the IP address is correct.", addr))?;
 

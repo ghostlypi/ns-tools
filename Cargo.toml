@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "netdrop"]
+
 [package]
 name = "nsen"
 version = "0.1.0"
@@ -25,14 +28,28 @@ libc = "0.2"
 
 [package.metadata.deb]
 maintainer = "Parth Iyer <parth.iyer@gmail.com>"
-depends = ""
+# netdrop's Nautilus menu, Accept/Reject dialog and toasts need these at runtime.
+depends = "python3-nautilus, python3-gi, zenity, libnotify-bin"
 section = "net"
 priority = "optional"
 assets = [
   ["target/release/nsen", "/usr/bin/nsen", "755"],
+  ["target/release/netdrop", "/usr/bin/netdrop", "755"],
+  ["packaging/netdrop.service", "/usr/lib/systemd/user/netdrop.service", "644"],
+  ["packaging/netdrop.py", "/usr/share/nautilus-python/extensions/netdrop.py", "644"],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
   { source = "target/release/nsen", dest = "/usr/bin/nsen", mode = "755" },
+  { source = "target/release/netdrop", dest = "/usr/bin/netdrop", mode = "755" },
+  { source = "packaging/netdrop.service", dest = "/usr/lib/systemd/user/netdrop.service", mode = "644" },
+  { source = "packaging/netdrop.py", dest = "/usr/share/nautilus-python/extensions/netdrop.py", mode = "644" },
 ]
+
+# Fedora package names for netdrop's runtime dependencies.
+[package.metadata.generate-rpm.requires]
+nautilus-python = "*"
+python3-gobject = "*"
+zenity = "*"
+libnotify = "*"
