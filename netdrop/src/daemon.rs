@@ -2,11 +2,12 @@
 //! runs the key exchange, and drives `nsen recv`.
 
 use crate::protocol::{self, ControlMsg};
-use crate::{config, crypto, nsen};
+use crate::{config, crypto, nsen, ui};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use std::net::TcpStream;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// Run the receiver daemon until interrupted. Transfers are handled one at a
 /// time (nsen's data port is fixed and single-shot).
@@ -88,12 +89,25 @@ fn handle(mut stream: TcpStream, me: &config::Identity, downloads: &Path) -> Res
     let ss = crypto::decapsulate(&dk, &ct)?;
     let password = crypto::derive_password(&ss, &offer.transfer_id, &offer.sender_id, &me.id);
 
+    // A desktop progress bar, updated from nsen's byte-progress lines. The
+    // dialog runs in its own process; we push percentages to it from the
+    // background reader thread inside `spawn_recv`.
+    let progress = Arc::new(Mutex::new(ui::Progress::start(
+        "netdrop — receiving",
+        &format!("Receiving \"{}\" from {}…", offer.filename, offer.sender_name),
+        false,
+    )));
+    let progress_cb = progress.clone();
+
     // Start nsen recv into the downloads dir; wait until it is listening.
     let data_port = protocol::data_port();
-    let mut child = nsen::spawn_recv(downloads, data_port, &password)?;
+    let mut child = nsen::spawn_recv(downloads, data_port, &password, move |done, total| {
+        progress_cb.lock().unwrap().set_progress(done, total);
+    })?;
     protocol::write_msg(&mut stream, &ControlMsg::Ready { data_port })?;
 
     let status = child.wait()?;
+    progress.lock().unwrap().close();
     let ok = status.success();
     let message = if ok {
         format!("received {}", offer.filename)

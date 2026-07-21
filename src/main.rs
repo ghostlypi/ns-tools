@@ -48,6 +48,10 @@ enum Commands {
         /// Port to connect to (defaults to 4444).
         #[arg(long)]
         port: Option<u16>,
+        /// Emit machine-readable `NSEN_PROGRESS <done> <total>` lines on stdout
+        /// (in addition to the on-screen bar) so a wrapper can track progress.
+        #[arg(long)]
+        progress_stdout: bool,
     },
 
     #[command(verbatim_doc_comment)]
@@ -58,7 +62,35 @@ enum Commands {
         /// Port to listen on (defaults to 4444).
         #[arg(long)]
         port: Option<u16>,
+        /// Emit machine-readable `NSEN_PROGRESS <done> <total>` lines on stdout
+        /// (in addition to the on-screen bar) so a wrapper can track progress.
+        #[arg(long)]
+        progress_stdout: bool,
     },
+}
+
+/// Spawn a background thread that prints `NSEN_PROGRESS <done> <total>` to stdout
+/// roughly every 100 ms until the bar finishes. This is a machine-readable
+/// side-channel for wrapper tools (like netdrop) that drive nsen and want to
+/// render their own progress UI; the human-facing bar (on stderr) is unaffected.
+/// Returns a handle to join so the final 100% line is flushed before exit.
+fn spawn_progress_reporter(progress: Arc<ProgressBar>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let stdout = io::stdout();
+        loop {
+            let done = progress.position();
+            let total = progress.length().unwrap_or(0);
+            {
+                let mut h = stdout.lock();
+                let _ = writeln!(h, "NSEN_PROGRESS {} {}", done, total);
+                let _ = h.flush();
+            }
+            if progress.is_finished() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+    })
 }
 
 /// Obtain the transfer password either from a single line on stdin
@@ -388,7 +420,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Recv { password_stdin, port } => {
+        Commands::Recv { password_stdin, port, progress_stdout } => {
             let ip = local_ip().context("Failed to get local IP")?;
             println!("Connect to {}", ip);
 
@@ -441,6 +473,12 @@ async fn main() -> Result<()> {
                 );
                 progress.set_message("Receiving");
 
+                let reporter = if progress_stdout {
+                    Some(spawn_progress_reporter(progress.clone()))
+                } else {
+                    None
+                };
+
                 let start = Instant::now();
                 let aes_reader = AesReader::new(buffered_stream, &key, &iv)?;
                 let zstd_decoder = ZstdDecoder::new(aes_reader)?;
@@ -464,10 +502,13 @@ async fn main() -> Result<()> {
 
                 let elapsed = start.elapsed();
                 progress.finish_with_message(format!("Complete in {}", format_duration(elapsed)));
+                if let Some(reporter) = reporter {
+                    let _ = reporter.join();
+                }
                 Ok(())
             }).await??;
         }
-        Commands::Send { ip, input, password_stdin, port } => {
+        Commands::Send { ip, input, password_stdin, port, progress_stdout } => {
             println!("Connecting to {}...", ip);
 
             let password = get_password(password_stdin)?;
@@ -518,6 +559,12 @@ async fn main() -> Result<()> {
                         .progress_chars("=>-"),
                 );
                 progress.set_message("Sending");
+
+                let reporter = if progress_stdout {
+                    Some(spawn_progress_reporter(progress.clone()))
+                } else {
+                    None
+                };
 
                 let start = Instant::now();
                 let aes_writer = AesWriter::new(buffered_stream, &key, &iv)?;
@@ -631,6 +678,9 @@ async fn main() -> Result<()> {
 
                 let elapsed = start.elapsed();
                 progress.finish_with_message(format!("Complete in {}", format_duration(elapsed)));
+                if let Some(reporter) = reporter {
+                    let _ = reporter.join();
+                }
                 Ok(())
             }).await??;
         }

@@ -74,13 +74,16 @@ fi
 # ── 6. systemd user service (the always-on receiver) ─────────────────────────
 # Point ExecStart at wherever we installed the binary, then import the
 # graphical-session env so the daemon can pop the zenity dialog.
-log "Installing + enabling the netdrop receiver service…"
+log "Installing + (re)starting the netdrop receiver service…"
 mkdir -p "$HOME/.config/systemd/user"
 sed "s#/usr/bin/netdrop#$PREFIX/netdrop#" packaging/netdrop.service \
     > "$HOME/.config/systemd/user/netdrop.service"
 systemctl --user daemon-reload
 systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS 2>/dev/null || true
-systemctl --user enable --now netdrop.service
+# `enable` (start at login) + `restart` (start now, or swap the binary if this is
+# a re-run/update — `enable --now` alone would leave an old daemon running).
+systemctl --user enable netdrop.service
+systemctl --user restart netdrop.service
 
 # ── 7. Firewall (so discovery + transfers get through) ───────────────────────
 # mDNS is UDP 5353; the control/data ports are TCP 4445/4444.

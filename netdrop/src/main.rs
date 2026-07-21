@@ -54,9 +54,9 @@ fn main() -> Result<()> {
         Commands::Daemon => daemon::run(),
         Commands::Discover { json, cached } => discover_cmd(json, cached),
         Commands::Send { target, paths } => {
-            let (ip, port) = resolve_target(&target)?;
+            let (ip, port, label) = resolve_target(&target)?;
             for path in &paths {
-                send::send_to_ip(&ip, port, path)?;
+                send::send_to_ip(&ip, port, path, &label)?;
             }
             Ok(())
         }
@@ -88,17 +88,18 @@ fn discover_cmd(json: bool, cached: bool) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a send target to `(ip, control_port)`: accept a literal IP, else
-/// match a discovered device by id or (case-insensitive) friendly name.
-fn resolve_target(target: &str) -> Result<(String, u16)> {
+/// Resolve a send target to `(ip, control_port, label)`: accept a literal IP,
+/// else match a discovered device by id or (case-insensitive) friendly name.
+/// `label` is the device's friendly name when known, otherwise the raw target.
+fn resolve_target(target: &str) -> Result<(String, u16, String)> {
     if target.parse::<std::net::IpAddr>().is_ok() {
-        return Ok((target.to_string(), protocol::control_port()));
+        return Ok((target.to_string(), protocol::control_port(), target.to_string()));
     }
     let exclude = config::identity().ok();
     let peers = discovery::browse(BROWSE_TIMEOUT, exclude.as_ref().map(|m| m.id.as_str()))?;
 
     if let Some(p) = peers.iter().find(|p| p.id == target) {
-        return Ok((p.addr.clone(), p.port));
+        return Ok((p.addr.clone(), p.port, p.name.clone()));
     }
     let named: Vec<&discovery::Peer> = peers
         .iter()
@@ -106,7 +107,7 @@ fn resolve_target(target: &str) -> Result<(String, u16)> {
         .collect();
     match named.as_slice() {
         [] => bail!("no nsen device matching \"{target}\" found on the network"),
-        [p] => Ok((p.addr.clone(), p.port)),
+        [p] => Ok((p.addr.clone(), p.port, p.name.clone())),
         _ => bail!("multiple devices named \"{target}\"; use the device id instead"),
     }
 }

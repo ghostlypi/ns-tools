@@ -48,6 +48,12 @@ exchange (ML-KEM-768 / CRYSTALS-Kyber, FIPS 203)**; the negotiated secret become
 the nsen key. The receiver just taps **Accept** or **Reject**. `nsen` still does the
 actual encrypted bulk transfer.
 
+While the sender waits for the other device, it shows a **"waiting to be accepted"**
+dialog; once accepted, **both devices show a live progress bar** for the transfer
+(GTK/`zenity` dialogs, so they work from the background receiver service too). These
+are driven by `nsen`'s new `--progress-stdout` flag, which emits machine-readable
+`NSEN_PROGRESS <done> <total>` lines that `netdrop` parses.
+
 ### Install and enable the receiver
 
 Install the package (`.rpm`/`.deb` from `make linux`), then enable the background

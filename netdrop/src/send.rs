@@ -9,7 +9,8 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Send one path to a receiver's control endpoint at `ip:control_port`.
-pub fn send_to_ip(ip: &str, control_port: u16, path: &Path) -> Result<()> {
+/// `label` is a human-friendly name for the receiver (shown in the dialogs).
+pub fn send_to_ip(ip: &str, control_port: u16, path: &Path, label: &str) -> Result<()> {
     if !path.exists() {
         bail!("no such file or directory: {}", path.display());
     }
@@ -41,13 +42,25 @@ pub fn send_to_ip(ip: &str, control_port: u16, path: &Path) -> Result<()> {
         }),
     )?;
 
-    let (receiver_id, pubkey_b64) = match protocol::read_msg(&mut stream)? {
+    // Waiting for the receiver to tap Accept/Reject: show an indeterminate
+    // "not accepted yet" dialog (and a terminal line) until a reply arrives.
+    println!("Waiting for {label} to accept \u{201c}{filename}\u{201d}…");
+    let waiting = crate::ui::Progress::start(
+        "netdrop — waiting",
+        &format!("Waiting for {label} to accept \u{201c}{filename}\u{201d}…"),
+        true,
+    );
+
+    let reply = protocol::read_msg(&mut stream);
+    waiting.finish();
+    let (receiver_id, pubkey_b64) = match reply? {
         ControlMsg::Accept {
             receiver_id,
             pubkey_b64,
         } => (receiver_id, pubkey_b64),
         ControlMsg::Reject => {
             println!("Declined by the receiver.");
+            crate::ui::notify("netdrop — declined", &format!("{label} declined {filename}"));
             return Ok(());
         }
         ControlMsg::Busy => bail!("receiver is busy with another transfer"),
@@ -75,8 +88,17 @@ pub fn send_to_ip(ip: &str, control_port: u16, path: &Path) -> Result<()> {
         other => bail!("expected READY, got {other:?}"),
     };
 
-    println!("Sending {filename} \u{2192} {receiver_id} ...");
-    nsen::run_send(ip, path, data_port, &password)?;
+    println!("Sending {filename} \u{2192} {label} ...");
+    let mut progress = crate::ui::Progress::start(
+        "netdrop — sending",
+        &format!("Sending \u{201c}{filename}\u{201d} to {label}…"),
+        false,
+    );
+    let send_result = nsen::run_send(ip, path, data_port, &password, |done, total| {
+        progress.set_progress(done, total);
+    });
+    progress.finish();
+    send_result?;
 
     // Best-effort final status from the receiver (ignored if it times out).
     if let Ok(ControlMsg::Done { ok, message }) = protocol::read_msg(&mut stream) {
@@ -85,7 +107,7 @@ pub fn send_to_ip(ip: &str, control_port: u16, path: &Path) -> Result<()> {
         }
     }
     println!("Sent {filename}.");
-    crate::ui::notify("netdrop — file sent", &format!("{filename} \u{2192} {receiver_id}"));
+    crate::ui::notify("netdrop — file sent", &format!("{filename} \u{2192} {label}"));
     Ok(())
 }
 
