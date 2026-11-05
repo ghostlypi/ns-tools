@@ -1,0 +1,27 @@
+[package]
+name = "nsen-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Parth Iyer <parth.iyer@gmail.com>"]
+description = "The nsen encrypted bulk-transfer engine, as a library"
+license = "BSD-3-Clause"
+
+# Deliberately small. This crate is the wire format and the crypto, so its dependency
+# list should stay readable in one screen. Discovery, key exchange and any UI belong in
+# netdrop-core; the CLI's clap/indicatif/rpassword belong in the `nsen` binary.
+[dependencies]
+# `vendored` builds OpenSSL from C source, which is what makes the Makefile's aarch64
+# cross-build work without a cross libssl. It is also the single most painful dependency
+# to cross-compile for the Android NDK — Phase 2 replaces this whole module with
+# RustCrypto and the feature goes away with it. `OPENSSL_NO_VENDOR=1` opts out today
+# (install.sh and CI both use it to link the system library instead).
+openssl = { version = "0.10", features = ["vendored"] }
+zstd = { version = "0.13.3", features = ["zstdmt"] }
+tar = "0.4.44"
+walkdir = "2"
+crossbeam-channel = "0.5"
+num_cpus = "1.16"
+thiserror = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

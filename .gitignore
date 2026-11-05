@@ -2,3 +2,11 @@
 /dist
 /.claude
 /.cargo
+
+# Android Rust build output
+/android/rust/target/
+
+# Local Aider history and cache
+/.aider.chat.history.md
+/.aider.input.history
+/.aider.tags.cache.v4/

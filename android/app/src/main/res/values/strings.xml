@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">netdrop</string>
+
+    <!-- The honest promise. netdrop cannot be ambiently discoverable on Android the way
+         the systemd user service is on desktop, so the UI says exactly what it does —
+         the same model as AirDrop's "Everyone for 10 Minutes". -->
+    <string name="discoverable_notice">netdrop is discoverable while this notification is showing.</string>
+    <string name="receiver_countdown">Discoverable as %1$s — %2$d min left</string>
+    <string name="receiver_stop">Stop</string>
+    <string name="receiver_extend">+30 min</string>
+
+    <string name="offer_title">%1$s wants to send you a file</string>
+    <string name="offer_accept">Accept</string>
+    <string name="offer_reject">Reject</string>
+
+    <!-- Shown once, after the first failed discovery. -->
+    <string name="hint_client_isolation">Can\'t see the other device? Some networks block
+        device-to-device traffic. Enter its IP address manually instead.</string>
+</resources>

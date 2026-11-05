@@ -1,0 +1,35 @@
+# Standalone until roadmap Phase 4: this package is listed in the root manifest's
+# `workspace.exclude`, and this empty table makes it its own workspace root so it can be
+# built independently. Delete both when it joins the main workspace.
+[workspace]
+
+[package]
+name = "netdrop-ffi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Parth Iyer <parth.iyer@gmail.com>"]
+description = "UniFFI bindings exposing netdrop to the Android app"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+# cdylib for the Android .so; lib so the uniffi-bindgen bin can read the metadata.
+crate-type = ["cdylib", "lib"]
+name = "netdrop_ffi"
+
+[dependencies]
+uniffi = { version = "0.29", features = ["cli"] }
+thiserror = "2"
+
+# Phase 4: uncomment once these crates exist and this package joins the workspace.
+# netdrop-core = { path = "../../netdrop-core" }
+# nsen-core    = { path = "../../nsen-core" }
+#
+# Android-only. `zstdmt` must stay OFF here — zstd-sys' multithread build pulls
+# pthread specifics that fight the NDK, and a phone has few cores and a battery.
+# [target.'cfg(target_os = "android")'.dependencies]
+# android_logger = "0.14"
+
+# No build.rs: the interface is declared with proc macros (`uniffi::setup_scaffolding!`)
+# and read back out of the compiled library by `uniffi-bindgen --library`. There is no
+# .udl file to keep in sync.

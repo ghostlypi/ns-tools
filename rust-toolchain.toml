@@ -1,0 +1,11 @@
+# Pinned so the wire-format known-answer tests in src/main.rs and tests/wire_v1.rs mean
+# the same thing on every machine, and so the upcoming Android cross-compilation is
+# reproducible rather than dependent on whatever stable happens to be installed.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+
+# Phase 4 adds the Android targets here:
+#   targets = ["aarch64-linux-android", "x86_64-linux-android"]
+# Left out for now so CI doesn't download toolchains nothing builds against yet; the
+# Makefile's `setup`/`setup-ci` targets handle the desktop cross-compilation triples.
