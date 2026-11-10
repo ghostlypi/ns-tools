@@ -165,21 +165,13 @@ pub fn send(opts: SendOpts, progress: &dyn ProgressSink, cancel: &CancelToken) -
 
     let mut buffered = BufWriter::with_capacity(BUFFER_SIZE, stream);
 
-    let filename = if is_file {
-        Some(
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| TransferError::protocol("filename is not valid UTF-8"))?
-                .to_string(),
-        )
-    } else {
-        None
-    };
-
+    // Both single files and directories go out as a tar (header type DIRECTORY), so a
+    // single file keeps its mode and mtime. Wire v1's raw single-file type has nowhere
+    // to put them; receivers still accept it from older senders.
     Header {
         salt,
         total_size,
-        filename,
+        filename: None,
     }
     .write(&mut buffered)?;
     buffered.flush()?;
@@ -211,15 +203,12 @@ pub fn send(opts: SendOpts, progress: &dyn ProgressSink, cancel: &CancelToken) -
     })
 }
 
-/// Single file: straight into the compressor, no tar framing.
+/// Single file: a one-entry tar, so its mode and mtime travel with it.
 fn send_one_file<W: Write>(path: &Path, zstd: &mut W, meter: &mut Meter) -> Result<()> {
-    let mut file = File::open(path).map_err(|source| TransferError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut writer = BufWriter::with_capacity(BUFFER_SIZE, ProgressWriter::new(zstd, meter));
-    io::copy(&mut file, &mut writer)?;
-    writer.flush()?;
+    let entry = pack::single_file_entry(path)?;
+    let mut tar = tar::Builder::new(ProgressWriter::new(zstd, meter));
+    pack::append_entry(&mut tar, Path::new(""), entry)?;
+    tar.finish()?;
     Ok(())
 }
 

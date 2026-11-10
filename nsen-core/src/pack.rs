@@ -338,6 +338,23 @@ mod tests {
     }
 
     #[test]
+    fn single_file_roundtrips_with_mtime() {
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("one.txt");
+        std::fs::write(&f, b"solo").unwrap();
+        set_mtime(&f, 1_400_000_000);
+
+        let mut tar = tar::Builder::new(Vec::new());
+        append_entry(&mut tar, Path::new(""), single_file_entry(&f).unwrap()).unwrap();
+        let bytes = tar.into_inner().unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        unpack_tar(&bytes[..], dest.path()).unwrap();
+        assert_eq!(std::fs::read(dest.path().join("one.txt")).unwrap(), b"solo");
+        assert_eq!(mtime(&dest.path().join("one.txt")), 1_400_000_000);
+    }
+
+    #[test]
     fn unreadable_directory_is_an_error() {
         use std::os::unix::fs::PermissionsExt;
         if unsafe { libc::geteuid() } == 0 {
@@ -418,4 +435,42 @@ pub(crate) fn unpack_tar<R: Read>(reader: R, dst: &Path) -> std::io::Result<()> 
         }
     }
     Ok(())
+}
+
+/// A single file named on the command line, as a top-level tar entry.
+///
+/// Unlike the directory walk this follows a symlink: naming a link means "send
+/// what it points to", as the old raw single-file path did.
+pub(crate) fn single_file_entry(path: &Path) -> Result<FileEntry> {
+    let read_err = |source| TransferError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    let metadata = std::fs::metadata(path).map_err(read_err)?;
+    let relative_path = PathBuf::from(
+        path.file_name()
+            .ok_or_else(|| TransferError::protocol("path has no file name"))?,
+    );
+    let (mode, mtime, size) = (mode_of(&metadata), mtime_of(&metadata), metadata.len());
+    if size <= MAX_FILE_BUFFER_SIZE {
+        let mut data = Vec::with_capacity(size as usize);
+        File::open(path)
+            .map_err(read_err)?
+            .read_to_end(&mut data)
+            .map_err(read_err)?;
+        Ok(FileEntry::Buffered {
+            relative_path,
+            data,
+            mode,
+            mtime,
+        })
+    } else {
+        Ok(FileEntry::Streamed {
+            relative_path,
+            full_path: path.to_path_buf(),
+            size,
+            mode,
+            mtime,
+        })
+    }
 }

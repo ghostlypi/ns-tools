@@ -609,3 +609,95 @@ fn hostile_symlink_cannot_write_outside_destination() {
         "a sender wrote through a symlink to outside the destination"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Single files: now sent as a one-entry tar so mode and mtime travel
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn single_file_preserves_mtime_and_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let src = tempfile::tempdir().unwrap();
+    for (port, name, len) in [(45018u16, "small.sh", 64usize), (45019, "big.bin", 17 * 1024 * 1024)] {
+        let file = src.path().join(name);
+        write_file(&file, &payload(len));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o750)).unwrap();
+        set_mtime(&file, 1_234_567_890);
+
+        let (dest, sent, received) = transfer(port, &file, "pw");
+        assert!(sent && received, "{name}");
+        let out = dest.path().join(name);
+        assert_eq!(std::fs::read(&out).unwrap(), payload(len), "{name}");
+        assert_eq!(mtime(&out), 1_234_567_890, "{name} mtime");
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750, "{name} mode");
+    }
+}
+
+/// Naming a symlink sends the file it points to, under the link's name.
+#[cfg(unix)]
+#[test]
+fn single_file_symlink_sends_its_target() {
+    let src = tempfile::tempdir().unwrap();
+    write_file(&src.path().join("real.txt"), b"behind the link");
+    std::os::unix::fs::symlink("real.txt", src.path().join("alias.txt")).unwrap();
+
+    let (dest, sent, received) = transfer(45020, &src.path().join("alias.txt"), "pw");
+    assert!(sent && received);
+    let out = dest.path().join("alias.txt");
+    assert!(std::fs::symlink_metadata(&out).unwrap().file_type().is_file());
+    assert_eq!(std::fs::read(&out).unwrap(), b"behind the link");
+}
+
+/// Senders built before this change still use the raw single-file stream
+/// (transfer type 0 + a filename). Receivers must keep accepting it.
+#[test]
+fn receiver_still_accepts_legacy_single_file_stream() {
+    if !(have("openssl") && have("zstd")) {
+        eprintln!("skipping: openssl/zstd not available");
+        return;
+    }
+    use std::net::TcpStream;
+
+    let work = tempfile::tempdir().unwrap();
+    let plain = work.path().join("plain.bin");
+    std::fs::write(&plain, payload(5000)).unwrap();
+
+    let salt = [9u8; 16];
+    let salt_hex: String = salt.iter().map(|b| format!("{b:02x}")).collect();
+    let kdf = Command::new("openssl")
+        .args(["kdf", "-keylen", "48", "-kdfopt", "digest:SHA2-256", "-kdfopt", "pass:pw"])
+        .arg("-kdfopt")
+        .arg(format!("hexsalt:{salt_hex}"))
+        .args(["-kdfopt", "iter:10000", "PBKDF2"])
+        .output()
+        .unwrap();
+    let key_iv = String::from_utf8_lossy(&kdf.stdout).trim().replace(':', "").to_lowercase();
+    let (key, iv) = key_iv.split_at(64);
+    let ct = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "zstd -q -c {} | openssl enc -aes-256-cbc -K {key} -iv {iv}",
+            plain.display()
+        ))
+        .output()
+        .unwrap();
+    assert!(ct.status.success());
+
+    let dest = tempfile::tempdir().unwrap();
+    let mut recv = start_recv(dest.path(), 45021, "pw");
+    {
+        let mut sock = TcpStream::connect(("127.0.0.1", 45021)).expect("connect");
+        sock.write_all(&salt).unwrap();
+        sock.write_all(&5000u64.to_be_bytes()).unwrap();
+        sock.write_all(&[0u8]).unwrap(); // legacy single-file type
+        let name = b"legacy.bin";
+        sock.write_all(&(name.len() as u32).to_be_bytes()).unwrap();
+        sock.write_all(name).unwrap();
+        sock.write_all(&ct.stdout).unwrap();
+    }
+    assert!(recv.wait().unwrap().success(), "receiver rejected a legacy stream");
+    assert_eq!(std::fs::read(dest.path().join("legacy.bin")).unwrap(), payload(5000));
+}

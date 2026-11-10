@@ -192,6 +192,24 @@ fn collect_entries(path: &Path) -> Result<Vec<DirEntry>> {
     Ok(entries)
 }
 
+// A file named on the command line, as a top-level tar entry. Follows a symlink:
+// naming a link means "send what it points to".
+fn single_file_entry(path: &Path) -> Result<FileEntry> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let relative_path = PathBuf::from(path.file_name().context("Path has no file name")?);
+    let (mode, mtime, size) = (mode_of(&metadata), mtime_of(&metadata), metadata.len());
+    if size <= MAX_FILE_BUFFER_SIZE {
+        let mut data = Vec::new();
+        File::open(path)
+            .with_context(|| format!("Failed to open {}", path.display()))?
+            .read_to_end(&mut data)?;
+        Ok(FileEntry::Buffered { relative_path, data, mode, mtime })
+    } else {
+        Ok(FileEntry::Streamed { relative_path, full_path: path.to_path_buf(), size, mode, mtime })
+    }
+}
+
 // Append one entry under `<dir_name>/<relative_path>` with its type, mode and mtime.
 fn append_entry<W: Write>(tar: &mut tar::Builder<W>, dir_name: &Path, entry: FileEntry) -> Result<()> {
     let mut header = tar::Header::new_gnu();
@@ -717,19 +735,10 @@ async fn main() -> Result<()> {
                 buffered_stream.write_all(&salt).context("Failed to send salt")?;
                 buffered_stream.write_all(&total_size.to_be_bytes()).context("Failed to send size")?;
 
-                // Send transfer type
-                let transfer_type = if is_file { TRANSFER_TYPE_SINGLE_FILE } else { TRANSFER_TYPE_DIRECTORY };
-                buffered_stream.write_all(&[transfer_type]).context("Failed to send transfer type")?;
-
-                // For single files, send filename
-                if is_file {
-                    let filename = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .context("Invalid filename")?;
-                    let filename_bytes = filename.as_bytes();
-                    buffered_stream.write_all(&(filename_bytes.len() as u32).to_be_bytes())?;
-                    buffered_stream.write_all(filename_bytes)?;
-                }
+                // Send transfer type. Single files go out as a one-entry tar too, so they
+                // keep their mode and mtime; the raw single-file type has nowhere to put
+                // them. Receivers still accept that type from older senders.
+                buffered_stream.write_all(&[TRANSFER_TYPE_DIRECTORY]).context("Failed to send transfer type")?;
 
                 buffered_stream.flush()?;
 
@@ -754,12 +763,11 @@ async fn main() -> Result<()> {
                 zstd_encoder.multithread(num_cpus::get() as u32)?;
 
                 if is_file {
-                    // Fast path: stream file directly without tar overhead
-                    let mut file = File::open(path)?;
+                    let entry = single_file_entry(path)?;
                     let progress_writer = ProgressWriter::new(&mut zstd_encoder, progress.clone());
-                    let mut buf_writer = BufWriter::with_capacity(BUFFER_SIZE, progress_writer);
-                    io::copy(&mut file, &mut buf_writer)?;
-                    buf_writer.flush()?;
+                    let mut tar_builder = tar::Builder::new(progress_writer);
+                    append_entry(&mut tar_builder, Path::new(""), entry)?;
+                    tar_builder.finish()?;
                 } else {
                     // Directory: use parallel file buffering with tar
                     let base_path = path.to_path_buf();

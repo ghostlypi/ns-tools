@@ -91,8 +91,9 @@ directories, and symlinks — sent as links, never followed, with their targets
 verbatim (relative, absolute or dangling). Not carried: ownership, xattrs/ACLs,
 hard links (each link arrives as its own copy) and sockets/FIFOs/device nodes
 (skipped). An unreadable file or directory fails the send instead of being left
-out. A single-file transfer carries only the contents (wire v1 has no field for
-its mtime).
+out. A single file is sent as a one-entry tar, so it keeps its mode and mtime too
+(naming a symlink sends the file it points to). Receivers still accept the older
+raw single-file stream, and older receivers unpack the new one unchanged.
 
 ### Security note
 
