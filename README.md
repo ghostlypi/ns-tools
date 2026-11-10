@@ -84,6 +84,16 @@ populated instantly from the daemon's live device cache.
 | `NETDROP_AUTO_ACCEPT=1` | Accept incoming transfers without prompting (headless) |
 | `NETDROP_NSEN_BIN` | Path to the `nsen` binary (default: `nsen` on `PATH`) |
 
+### What a directory transfer preserves
+
+File contents, permission bits, modification times (files and directories), empty
+directories, and symlinks — sent as links, never followed, with their targets
+verbatim (relative, absolute or dangling). Not carried: ownership, xattrs/ACLs,
+hard links (each link arrives as its own copy) and sockets/FIFOs/device nodes
+(skipped). An unreadable file or directory fails the send instead of being left
+out. A single-file transfer carries only the contents (wire v1 has no field for
+its mtime).
+
 ### Security note
 
 The key exchange is anonymous: ML-KEM protects against passive eavesdroppers, but

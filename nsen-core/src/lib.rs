@@ -39,7 +39,6 @@ pub use error::{Result, TransferError};
 pub use progress::{CancelToken, NoProgress, ProgressSink};
 
 use cipher::{AesReader, AesWriter, BUFFER_SIZE};
-use pack::FileEntry;
 use progress::{classify, Meter, ProgressReader, ProgressWriter};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
@@ -229,7 +228,7 @@ fn send_directory<W: Write>(path: &Path, zstd: &mut W, meter: &mut Meter) -> Res
     let base_path = path.to_path_buf();
     let dir_name = PathBuf::from(path.file_name().unwrap_or(path.as_os_str()));
 
-    let entries = pack::collect_entries(path);
+    let entries = pack::collect_entries(path)?;
     let total_files = entries.len();
 
     let num_workers = num_cpus::get().min(8);
@@ -262,36 +261,7 @@ fn send_directory<W: Write>(path: &Path, zstd: &mut W, meter: &mut Meter) -> Res
 
         while processed < total_files {
             let Ok(result) = result_rx.recv() else { break };
-            match result? {
-                FileEntry::Buffered {
-                    relative_path,
-                    data,
-                    mode,
-                } => {
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(data.len() as u64);
-                    header.set_mode(mode);
-                    header.set_cksum();
-                    tar.append_data(&mut header, dir_name.join(&relative_path), &data[..])?;
-                }
-                FileEntry::Streamed {
-                    relative_path,
-                    full_path,
-                    size,
-                    mode,
-                } => {
-                    let mut file =
-                        File::open(&full_path).map_err(|source| TransferError::ReadFile {
-                            path: full_path.clone(),
-                            source,
-                        })?;
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(size);
-                    header.set_mode(mode);
-                    header.set_cksum();
-                    tar.append_data(&mut header, dir_name.join(&relative_path), &mut file)?;
-                }
-            }
+            pack::append_entry(&mut tar, &dir_name, result?)?;
             processed += 1;
         }
 
@@ -390,7 +360,7 @@ pub fn recv_on(
                 out.flush()?;
             }
             None => {
-                tar::Archive::new(&mut reader).unpack(dest)?;
+                pack::unpack_tar(&mut reader, dest)?;
             }
         }
         Ok(())

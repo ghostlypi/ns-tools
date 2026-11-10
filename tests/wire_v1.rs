@@ -403,3 +403,209 @@ fn stream_decodes_with_external_tools() {
     assert!(files.contains("oracle/one.txt"), "got listing: {files}");
     assert!(files.contains("oracle/sub/two.txt"), "got listing: {files}");
 }
+
+// ---------------------------------------------------------------------------
+// Metadata: mtimes, empty directories, symlinks
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn set_mtime(path: &Path, secs: u64) {
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    std::fs::File::open(path).unwrap().set_modified(t).unwrap();
+}
+
+#[cfg(unix)]
+fn mtime(path: &Path) -> u64 {
+    std::fs::symlink_metadata(path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Before this was fixed every received file was stamped 1970-01-01.
+#[cfg(unix)]
+#[test]
+fn directory_roundtrip_preserves_mtimes() {
+    let src = tempfile::tempdir().unwrap();
+    let root = src.path().join("dated");
+    write_file(&root.join("small.txt"), b"tiny");
+    write_file(&root.join("sub/big.bin"), &payload(17 * 1024 * 1024)); // streamed branch
+    set_mtime(&root.join("small.txt"), 1_600_000_000);
+    set_mtime(&root.join("sub/big.bin"), 1_650_000_000);
+    // Directory mtimes last: writing children bumps the parent's.
+    set_mtime(&root.join("sub"), 1_700_000_000);
+    set_mtime(&root, 1_710_000_000);
+
+    let (dest, sent, received) = transfer(45012, &root, "pw");
+    assert!(sent && received);
+
+    let out = dest.path().join("dated");
+    assert_eq!(mtime(&out.join("small.txt")), 1_600_000_000);
+    assert_eq!(mtime(&out.join("sub/big.bin")), 1_650_000_000);
+    assert_eq!(mtime(&out.join("sub")), 1_700_000_000);
+    assert_eq!(mtime(&out), 1_710_000_000);
+}
+
+#[test]
+fn empty_directories_survive() {
+    let src = tempfile::tempdir().unwrap();
+    let root = src.path().join("hollow");
+    std::fs::create_dir_all(root.join("empty")).unwrap();
+    std::fs::create_dir_all(root.join("a/b/also-empty")).unwrap();
+    write_file(&root.join("a/file.txt"), b"x");
+
+    let (dest, sent, received) = transfer(45013, &root, "pw");
+    assert!(sent && received);
+
+    let out = dest.path().join("hollow");
+    assert!(out.join("empty").is_dir());
+    assert!(out.join("a/b/also-empty").is_dir());
+    assert_eq!(std::fs::read(out.join("a/file.txt")).unwrap(), b"x");
+}
+
+/// A whole sent folder that is itself empty must still arrive.
+#[test]
+fn empty_root_directory_survives() {
+    let src = tempfile::tempdir().unwrap();
+    let root = src.path().join("nothing-here");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let (dest, sent, received) = transfer(45014, &root, "pw");
+    assert!(sent && received);
+    assert!(dest.path().join("nothing-here").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinks_are_sent_as_links_not_followed() {
+    use std::os::unix::fs::symlink;
+
+    let src = tempfile::tempdir().unwrap();
+    let root = src.path().join("linky");
+    write_file(&root.join("real/data.txt"), b"payload");
+    symlink("real/data.txt", root.join("rel-file")).unwrap();
+    symlink("real", root.join("rel-dir")).unwrap();
+    symlink("/usr/bin/env", root.join("absolute")).unwrap();
+    symlink("does/not/exist", root.join("dangling")).unwrap();
+    // Longer than the 100-byte tar name field: needs a GNU long-link record.
+    let long_target = format!("real/{}", "n".repeat(150));
+    symlink(&long_target, root.join("long")).unwrap();
+
+    let (dest, sent, received) = transfer(45015, &root, "pw");
+    assert!(sent && received);
+
+    let out = dest.path().join("linky");
+    let link = |name: &str| std::fs::read_link(out.join(name)).unwrap();
+    assert_eq!(link("rel-file"), Path::new("real/data.txt"));
+    assert_eq!(link("rel-dir"), Path::new("real"));
+    assert_eq!(link("absolute"), Path::new("/usr/bin/env"));
+    assert_eq!(link("dangling"), Path::new("does/not/exist"));
+    assert_eq!(link("long"), Path::new(&long_target));
+    assert_eq!(std::fs::read(out.join("rel-file")).unwrap(), b"payload");
+    // The directory link must stay a link: its contents are not copied a second time.
+    assert!(std::fs::symlink_metadata(out.join("rel-dir")).unwrap().file_type().is_symlink());
+}
+
+/// Unreadable entries used to vanish from the transfer without a word.
+#[cfg(unix)]
+#[test]
+fn unreadable_directory_fails_the_send() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: root can read everything");
+        return;
+    }
+    let src = tempfile::tempdir().unwrap();
+    let root = src.path().join("locked");
+    write_file(&root.join("secret/inside.txt"), b"x");
+    write_file(&root.join("ok.txt"), b"y");
+    std::fs::set_permissions(root.join("secret"), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let dest = tempfile::tempdir().unwrap();
+    let mut recv = start_recv(dest.path(), 45016, "pw");
+    let sent = run_send(45016, &root, "pw");
+    // The sender bails before connecting, so unblock the receiver ourselves.
+    let _ = recv.kill();
+    let _ = recv.wait();
+    std::fs::set_permissions(root.join("secret"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!sent, "send must fail rather than silently skip an unreadable directory");
+}
+
+/// Now that real symlinks travel, prove a hostile sender still cannot use one to
+/// write outside the destination: a link `evil -> <outside>` followed by an entry
+/// `evil/pwned.txt`. `tar::Archive::unpack` must refuse the second entry.
+#[cfg(unix)]
+#[test]
+fn hostile_symlink_cannot_write_outside_destination() {
+    if !(have("openssl") && have("zstd") && have("tar")) {
+        eprintln!("skipping: openssl/zstd/tar not all available");
+        return;
+    }
+    use std::net::TcpStream;
+
+    let jail = tempfile::tempdir().unwrap();
+    let dest = jail.path().join("downloads");
+    let outside = jail.path().join("outside");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    // Build the hostile tar by hand: the link first, then a file "through" it.
+    let work = tempfile::tempdir().unwrap();
+    let stage = work.path().join("stage");
+    std::fs::create_dir_all(stage.join("pkg")).unwrap();
+    std::os::unix::fs::symlink(&outside, stage.join("pkg/evil")).unwrap();
+    let tar1 = work.path().join("one.tar");
+    let tar2 = work.path().join("two.tar");
+    let ok = |c: &mut Command| assert!(c.status().unwrap().success());
+    ok(Command::new("tar").current_dir(&stage).args(["-cf"]).arg(&tar1).arg("pkg"));
+    let stage2 = work.path().join("stage2");
+    write_file(&stage2.join("pkg/evil/pwned.txt"), b"gotcha");
+    ok(Command::new("tar").current_dir(&stage2).args(["-cf"]).arg(&tar2).arg("pkg/evil/pwned.txt"));
+    ok(Command::new("tar").args(["-Af"]).arg(&tar1).arg(&tar2));
+
+    let salt = [7u8; 16];
+    let salt_hex: String = salt.iter().map(|b| format!("{b:02x}")).collect();
+    let kdf = Command::new("openssl")
+        .args(["kdf", "-keylen", "48", "-kdfopt", "digest:SHA2-256", "-kdfopt", "pass:pw"])
+        .arg("-kdfopt")
+        .arg(format!("hexsalt:{salt_hex}"))
+        .args(["-kdfopt", "iter:10000", "PBKDF2"])
+        .output()
+        .unwrap();
+    let key_iv = String::from_utf8_lossy(&kdf.stdout).trim().replace(':', "").to_lowercase();
+    let (key, iv) = key_iv.split_at(64);
+    let ct = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "zstd -q -c {} | openssl enc -aes-256-cbc -K {key} -iv {iv}",
+            tar1.display()
+        ))
+        .output()
+        .unwrap();
+    assert!(ct.status.success());
+
+    let mut recv = start_recv(&dest, 45017, "pw");
+    {
+        let mut sock = TcpStream::connect(("127.0.0.1", 45017)).expect("connect");
+        sock.write_all(&salt).unwrap();
+        sock.write_all(&64u64.to_be_bytes()).unwrap();
+        sock.write_all(&[1u8]).unwrap(); // directory transfer
+        sock.write_all(&ct.stdout).unwrap();
+    }
+    let _ = recv.wait();
+
+    // The link itself must have arrived, or this test proved nothing.
+    assert!(
+        std::fs::symlink_metadata(dest.join("pkg/evil")).is_ok(),
+        "hostile stream was not decoded; the test is not exercising unpack"
+    );
+    assert!(
+        !outside.join("pwned.txt").exists(),
+        "a sender wrote through a symlink to outside the destination"
+    );
+}

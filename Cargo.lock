@@ -350,6 +350,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
 name = "filetime"
 version = "0.2.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -728,7 +734,23 @@ dependencies = [
  "openssl",
  "rpassword",
  "tar",
+ "tempfile",
  "tokio",
+ "walkdir",
+ "zstd",
+]
+
+[[package]]
+name = "nsen-core"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "libc",
+ "num_cpus",
+ "openssl",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.17",
  "walkdir",
  "zstd",
 ]
@@ -1188,6 +1210,19 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
+dependencies = [
+ "fastrand",
+ "getrandom 0.3.4",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

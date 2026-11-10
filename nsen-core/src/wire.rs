@@ -28,7 +28,7 @@ pub(crate) const TRANSFER_TYPE_DIRECTORY: u8 = 1;
 /// `../.bashrc` or `../.config/autostart/evil.desktop`.
 ///
 /// Only the single-file path needs this: directory transfers go through
-/// `tar::Archive::unpack`, which enforces its own `validate_inside_dst` check.
+/// `pack::unpack_tar`, which routes every entry through `tar::Entry::unpack_in` and its checks.
 pub(crate) fn sanitize_wire_filename(raw: &str) -> Result<String> {
     let name = Path::new(raw)
         .file_name()

@@ -132,13 +132,186 @@ enum FileEntry {
         relative_path: PathBuf,
         data: Vec<u8>,
         mode: u32,
+        mtime: u64,
     },
     Streamed {
         relative_path: PathBuf,
         full_path: PathBuf,
         size: u64,
         mode: u32,
+        mtime: u64,
     },
+    // Sent as its own entry so empty directories survive and keep their mode/mtime.
+    Dir {
+        relative_path: PathBuf,
+        mode: u32,
+        mtime: u64,
+    },
+    // Sent as a link, never followed; the target is carried verbatim.
+    Symlink {
+        relative_path: PathBuf,
+        target: PathBuf,
+        mtime: u64,
+    },
+}
+
+// Seconds since the Unix epoch, clamped to 0 for pre-1970 or unreadable timestamps.
+fn mtime_of(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn mode_of(metadata: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode()
+}
+
+#[cfg(not(unix))]
+fn mode_of(metadata: &std::fs::Metadata) -> u32 {
+    if metadata.is_dir() { 0o755 } else { 0o644 }
+}
+
+// Every directory, regular file and symlink under `path` (including `path` itself),
+// sorted. Symlinks are not followed; sockets, FIFOs and devices are skipped. An
+// unreadable entry is an error, never silently dropped.
+fn collect_entries(path: &Path) -> Result<Vec<DirEntry>> {
+    let mut entries = Vec::new();
+    for entry in WalkDir::new(path) {
+        let entry = entry.context("Failed to read directory tree")?;
+        let ft = entry.file_type();
+        if ft.is_file() || ft.is_dir() || ft.is_symlink() {
+            entries.push(entry);
+        }
+    }
+    entries.sort_by(|a, b| a.path().cmp(b.path()));
+    Ok(entries)
+}
+
+// Append one entry under `<dir_name>/<relative_path>` with its type, mode and mtime.
+fn append_entry<W: Write>(tar: &mut tar::Builder<W>, dir_name: &Path, entry: FileEntry) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    match entry {
+        FileEntry::Buffered { relative_path, data, mode, mtime } => {
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(mode);
+            header.set_mtime(mtime);
+            tar.append_data(&mut header, dir_name.join(&relative_path), &data[..])?;
+        }
+        FileEntry::Streamed { relative_path, full_path, size, mode, mtime } => {
+            let mut file = File::open(&full_path)
+                .with_context(|| format!("Failed to open {}", full_path.display()))?;
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(size);
+            header.set_mode(mode);
+            header.set_mtime(mtime);
+            tar.append_data(&mut header, dir_name.join(&relative_path), &mut file)?;
+        }
+        FileEntry::Dir { relative_path, mode, mtime } => {
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(mode);
+            header.set_mtime(mtime);
+            tar.append_data(&mut header, dir_name.join(&relative_path), io::empty())?;
+        }
+        FileEntry::Symlink { relative_path, target, mtime } => {
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_mtime(mtime);
+            // Emits GNU long-name/long-link records for paths over 100 bytes.
+            tar.append_link(&mut header, dir_name.join(&relative_path), &target)?;
+        }
+    }
+    Ok(())
+}
+
+
+/// Reduce a filename received over the wire to a bare, safe basename.
+///
+/// The sender controls this string and the receiver creates it in its working
+/// directory (`~/Downloads` under netdrop). Without this a peer whose transfer is
+/// accepted could write `../.bashrc`. Mirrors `nsen_core::wire::sanitize_wire_filename`.
+fn sanitize_wire_filename(raw: &str) -> Result<String> {
+    let name = Path::new(raw)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    // A backslash is a legal filename byte on Unix, so a Windows-style path would
+    // otherwise survive as one long literal name.
+    if name.is_empty() || name == "." || name == ".." || name.contains('\\') {
+        anyhow::bail!("Refusing unsafe filename from sender: {:?}", raw);
+    }
+    Ok(name.to_string())
+}
+
+/// Unpack a tar stream into `dst`, like `tar::Archive::unpack`, but also restore
+/// directory mtimes (the tar crate sets a directory's permissions, never its mtime).
+///
+/// This mirrors `Archive::unpack` step for step: create and canonicalize `dst`,
+/// unpack non-directories as they stream past, then directories in reverse path
+/// order, every entry through `Entry::unpack_in` and its traversal checks. Only then,
+/// once nothing else will write into them, are directory mtimes set — best-effort,
+/// and only on paths that are still real directories inside `dst`.
+fn unpack_tar<R: Read>(reader: R, dst: &Path) -> std::io::Result<()> {
+    use std::path::Component;
+
+    if dst.symlink_metadata().is_err() {
+        std::fs::create_dir_all(dst)?;
+    }
+    let dst = &dst.canonicalize().unwrap_or_else(|_| dst.to_path_buf());
+
+    let mut archive = tar::Archive::new(reader);
+    let mut directories = Vec::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.header().entry_type() == tar::EntryType::Directory {
+            directories.push(entry);
+        } else {
+            entry.unpack_in(dst)?;
+        }
+    }
+
+    directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+    let mut dir_times = Vec::with_capacity(directories.len());
+    for mut dir in directories {
+        let mtime = dir.header().mtime().ok();
+        // Same component rules `unpack_in` applies; `..` means it was skipped.
+        let mut target = dst.to_path_buf();
+        let mut skipped = false;
+        for part in dir.path()?.components() {
+            match part {
+                Component::Normal(p) => target.push(p),
+                Component::ParentDir => skipped = true,
+                _ => {}
+            }
+        }
+        if dir.unpack_in(dst)? && !skipped {
+            if let Some(mtime) = mtime {
+                dir_times.push((target, mtime));
+            }
+        }
+    }
+
+    for (path, mtime) in dir_times {
+        let is_real_dir = path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        let inside = path.canonicalize().map(|c| c.starts_with(dst)).unwrap_or(false);
+        if is_real_dir && inside {
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime);
+            if let Ok(f) = File::open(&path) {
+                let _ = f.set_modified(t);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn optimize_tcp_stream(stream: &TcpStream) -> io::Result<()> {
@@ -365,37 +538,44 @@ fn file_reader_worker(
     while let Ok(entry) = work_rx.recv() {
         let result = (|| -> Result<FileEntry> {
             let path = entry.path();
+            // Does not follow symlinks, so a link reports itself.
             let metadata = entry.metadata()?;
-
-            if !metadata.is_file() {
-                anyhow::bail!("Not a file");
-            }
 
             let relative_path = path.strip_prefix(&base_path)
                 .unwrap_or(path)
                 .to_path_buf();
+            let mtime = mtime_of(&metadata);
+
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(path)
+                    .with_context(|| format!("Failed to read link {}", path.display()))?;
+                return Ok(FileEntry::Symlink { relative_path, target, mtime });
+            }
+
+            let mode = mode_of(&metadata);
+
+            if metadata.is_dir() {
+                return Ok(FileEntry::Dir { relative_path, mode, mtime });
+            }
+
+            if !metadata.is_file() {
+                anyhow::bail!("{} is not a regular file, directory or symlink", path.display());
+            }
 
             let size = metadata.len();
-
-            #[cfg(unix)]
-            let mode = {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode()
-            };
-
-            #[cfg(not(unix))]
-            let mode = 0o644;
 
             // Only buffer small files to prevent OOM
             if size <= MAX_FILE_BUFFER_SIZE {
                 let mut data = Vec::new();
-                let mut file = File::open(path)?;
+                let mut file = File::open(path)
+                    .with_context(|| format!("Failed to open {}", path.display()))?;
                 file.read_to_end(&mut data)?;
 
                 Ok(FileEntry::Buffered {
                     relative_path,
                     data,
                     mode,
+                    mtime,
                 })
             } else {
                 // Large files: return path for streaming
@@ -404,6 +584,7 @@ fn file_reader_worker(
                     full_path: path.to_path_buf(),
                     size,
                     mode,
+                    mtime,
                 })
             }
         })();
@@ -456,8 +637,9 @@ async fn main() -> Result<()> {
 
                     let mut filename_bytes = vec![0u8; filename_len];
                     buffered_stream.read_exact(&mut filename_bytes)?;
-                    Some(String::from_utf8(filename_bytes)
-                        .context("Invalid filename encoding")?)
+                    let raw = String::from_utf8(filename_bytes)
+                        .context("Invalid filename encoding")?;
+                    Some(sanitize_wire_filename(&raw)?)
                 } else {
                     None
                 };
@@ -494,8 +676,8 @@ async fn main() -> Result<()> {
                     }
                     TRANSFER_TYPE_DIRECTORY => {
                         // Use tar to unpack
-                        let mut archive = tar::Archive::new(progress_reader);
-                        archive.unpack(".").context("Failed to unpack archive")?;
+                        unpack_tar(progress_reader, Path::new("."))
+                            .context("Failed to unpack archive")?;
                     }
                     _ => anyhow::bail!("Unknown transfer type: {}", transfer_type[0]),
                 }
@@ -584,14 +766,7 @@ async fn main() -> Result<()> {
                     let dir_name = path.file_name().unwrap_or(path.as_os_str());
 
                     // Collect all file entries
-                    let mut entries: Vec<DirEntry> = WalkDir::new(path)
-                        .into_iter()
-                        .filter_map(|e| e.ok())
-                        .filter(|e| e.file_type().is_file())
-                        .collect();
-
-                    // Sort for deterministic ordering
-                    entries.sort_by(|a, b| a.path().cmp(b.path()));
+                    let entries = collect_entries(path)?;
 
                     let num_workers = num_cpus::get().min(8); // Cap at 8 workers
                     let (work_tx, work_rx) = bounded::<DirEntry>(FILE_BUFFER_QUEUE_SIZE);
@@ -633,31 +808,7 @@ async fn main() -> Result<()> {
                     while let Ok(result) = result_rx.recv() {
                         let entry = result?;
 
-                        match entry {
-                            FileEntry::Buffered { relative_path, data, mode } => {
-                                let tar_path = PathBuf::from(dir_name).join(&relative_path);
-
-                                let mut header = tar::Header::new_gnu();
-                                header.set_size(data.len() as u64);
-                                header.set_mode(mode);
-                                header.set_cksum();
-
-                                tar_builder.append_data(&mut header, tar_path, &data[..])?;
-                            }
-                            FileEntry::Streamed { relative_path, full_path, size, mode } => {
-                                let tar_path = PathBuf::from(dir_name).join(&relative_path);
-
-                                let mut file = File::open(&full_path)
-                                    .with_context(|| format!("Failed to open {}", full_path.display()))?;
-
-                                let mut header = tar::Header::new_gnu();
-                                header.set_size(size);
-                                header.set_mode(mode);
-                                header.set_cksum();
-
-                                tar_builder.append_data(&mut header, tar_path, &mut file)?;
-                            }
-                        }
+                        append_entry(&mut tar_builder, Path::new(dir_name), entry)?;
 
                         files_processed += 1;
                         if files_processed >= total_files {
